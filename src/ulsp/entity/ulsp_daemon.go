@@ -82,6 +82,9 @@ type ScipConfig struct {
 	LoadFromBazel       bool     `yaml:"loadFromBazel"`
 	LoadFromDirectories bool     `yaml:"loadFromDirectories"`
 	Directories         []string `yaml:"directories"`
+	// UseBloomImplementations enables the bloom-filter-backed implementation lookup path.
+	// When enabled, implementation lookup may scan fewer index files at the cost of probabilistic prefiltering.
+	UseBloomImplementations bool `yaml:"useBloomImplementations"`
 }
 
 // FormatterConfig configures a formatter to be run based on language and filter patterns.

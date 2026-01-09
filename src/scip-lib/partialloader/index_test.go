@@ -459,3 +459,14 @@ func TestLoadIndexWithImplementors(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"scip-go gomod code.uber.internal/devexp/test_management/tracing 0f67d80e60274b77875a241c43ef980bc9ffe0d8 `code.uber.internal/devexp/test_management/tracing`/index#"}, implementors)
 }
+
+func TestLoadIndexWithImplementors_Bloom(t *testing.T) {
+	t.Setenv("SCIP_LSP_USE_BLOOM_IMPLEMENTATIONS", "true")
+	index := NewPartialLoadedIndex("../testdata")
+	err := index.LoadIndexFile(filepath.Join("../testdata", "index.scip"))
+	assert.NoError(t, err)
+	symbol := "scip-go gomod code.uber.internal/devexp/test_management/tracing 0f67d80e60274b77875a241c43ef980bc9ffe0d8 `code.uber.internal/devexp/test_management/tracing`/PartialIndex#"
+	implementors, err := index.Implementations(symbol)
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"scip-go gomod code.uber.internal/devexp/test_management/tracing 0f67d80e60274b77875a241c43ef980bc9ffe0d8 `code.uber.internal/devexp/test_management/tracing`/index#"}, implementors)
+}

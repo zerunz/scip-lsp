@@ -150,7 +150,7 @@ func TestInitialize(t *testing.T) {
 			watchCloser:   make(chan bool),
 			initialLoad:   make(chan bool, 1),
 			loadedIndices: make(map[string]string),
-			newScipRegistry: func(workspaceRoot string, indexFolder string) registry.Registry {
+			newScipRegistry: func(workspaceRoot string, indexFolder string, _ bool) registry.Registry {
 				return reg
 			},
 			indexNotifier: NewIndexNotifier(notMgrMock),
@@ -1364,7 +1364,7 @@ func TestIndexReloading(t *testing.T) {
 			watcher:        w,
 			loadedIndices:  make(map[string]string),
 			debounceTimers: make(map[string]*time.Timer),
-			newScipRegistry: func(workspaceRoot, indexFolder string) registry.Registry {
+			newScipRegistry: func(workspaceRoot, indexFolder string, _ bool) registry.Registry {
 				return mockReg
 			},
 			indexNotifier: NewIndexNotifier(mockNotMgr),
@@ -1425,7 +1425,7 @@ func TestIndexReloading(t *testing.T) {
 			watcher:        w,
 			loadedIndices:  make(map[string]string),
 			debounceTimers: make(map[string]*time.Timer),
-			newScipRegistry: func(workspaceRoot, indexFolder string) registry.Registry {
+			newScipRegistry: func(workspaceRoot, indexFolder string, _ bool) registry.Registry {
 				return mockReg
 			},
 			indexNotifier: NewIndexNotifier(mockNotMgr),
@@ -1495,7 +1495,7 @@ func TestIndexReloading(t *testing.T) {
 			watcher:        w,
 			loadedIndices:  make(map[string]string),
 			debounceTimers: make(map[string]*time.Timer),
-			newScipRegistry: func(workspaceRoot, indexFolder string) registry.Registry {
+			newScipRegistry: func(workspaceRoot, indexFolder string, _ bool) registry.Registry {
 				return mockReg
 			},
 			indexNotifier: NewIndexNotifier(mockNotMgr),
@@ -1578,7 +1578,7 @@ func TestIndexReloading(t *testing.T) {
 			loadedIndices: make(map[string]string),
 			diagnostics:   diagnostics,
 			documents:     documents,
-			newScipRegistry: func(workspaceRoot, indexFolder string) registry.Registry {
+			newScipRegistry: func(workspaceRoot, indexFolder string, _ bool) registry.Registry {
 				return mockReg
 			},
 			debounceTimers: make(map[string]*time.Timer),
@@ -1753,7 +1753,7 @@ func TestNotifier(t *testing.T) {
 			initialLoad:   make(chan bool, 1),
 			fs:            fsMock,
 			loadedIndices: make(map[string]string),
-			newScipRegistry: func(workspaceRoot string, indexFolder string) registry.Registry {
+			newScipRegistry: func(workspaceRoot string, indexFolder string, _ bool) registry.Registry {
 				return mockReg
 			},
 			indexNotifier: NewIndexNotifier(mockNotMgr),
@@ -1810,7 +1810,7 @@ func TestNotifier(t *testing.T) {
 			initialLoad:   make(chan bool, 1),
 			fs:            fsMock,
 			loadedIndices: make(map[string]string),
-			newScipRegistry: func(workspaceRoot string, indexFolder string) registry.Registry {
+			newScipRegistry: func(workspaceRoot string, indexFolder string, _ bool) registry.Registry {
 				return regMock
 			},
 			indexNotifier: NewIndexNotifier(mockNotMgr),
@@ -1868,7 +1868,7 @@ func TestNotifier(t *testing.T) {
 			initialLoad: make(chan bool, 1),
 			fs:          fsMock,
 			ideGateway:  mockGateway,
-			newScipRegistry: func(workspaceRoot string, indexFolder string) registry.Registry {
+			newScipRegistry: func(workspaceRoot string, indexFolder string, _ bool) registry.Registry {
 				return regMock
 			},
 			indexNotifier: NewIndexNotifier(mockNotMgr),
@@ -1931,7 +1931,7 @@ func TestNotifier(t *testing.T) {
 			loadedIndices: make(map[string]string),
 			diagnostics:   diagnostics,
 			documents:     documents,
-			newScipRegistry: func(workspaceRoot, indexFolder string) registry.Registry {
+			newScipRegistry: func(workspaceRoot, indexFolder string, _ bool) registry.Registry {
 				return mockReg
 			},
 			debounceTimers: make(map[string]*time.Timer),
@@ -2049,7 +2049,7 @@ func TestNotifier(t *testing.T) {
 			diagnostics:    diagnostics,
 			documents:      documents,
 			debounceTimers: make(map[string]*time.Timer),
-			newScipRegistry: func(workspaceRoot, indexFolder string) registry.Registry {
+			newScipRegistry: func(workspaceRoot, indexFolder string, _ bool) registry.Registry {
 				return mockReg
 			},
 			indexNotifier: NewIndexNotifier(mockNotMgr),

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -62,10 +63,34 @@ type PartialLoadedIndex struct {
 	// ImplementorsBySymbol maps abstract/interface symbol -> set of implementing symbols
 	implementorsMu       sync.RWMutex
 	ImplementorsBySymbol map[string]map[string]struct{}
+
+	// If enabled, Implementations() will use a Bloom filter prefilter and scan matching index files
+	// on demand, instead of relying only on the in-memory ImplementorsBySymbol map.
+	useBloomImplementations bool
+	// indexBlooms maps index file path -> Bloom filter containing abstract symbols that have at least one implementor in that index.
+	indexBloomMu sync.RWMutex
+	indexBlooms  map[string]*BloomFilter
+	// loadedIndexPaths tracks the set of loaded index file paths.
+	loadedIndexMu    sync.RWMutex
+	loadedIndexPaths map[string]struct{}
+}
+
+// Options configure PartialLoadedIndex behavior.
+type Options struct {
+	// UseBloomImplementations enables the bloom-filter-backed implementation lookup path.
+	UseBloomImplementations bool
 }
 
 // NewPartialLoadedIndex creates a new PartialLoadedIndex
 func NewPartialLoadedIndex(indexFolder string) PartialIndex {
+	useBloom := strings.EqualFold(os.Getenv("SCIP_LSP_USE_BLOOM_IMPLEMENTATIONS"), "true")
+	return NewPartialLoadedIndexWithOptions(indexFolder, Options{UseBloomImplementations: useBloom})
+}
+
+// NewPartialLoadedIndexWithOptions creates a new PartialLoadedIndex using explicit options.
+// Options take precedence, but we also keep the legacy env var as a fallback to preserve old behavior.
+func NewPartialLoadedIndexWithOptions(indexFolder string, opts Options) PartialIndex {
+	useBloom := opts.UseBloomImplementations || strings.EqualFold(os.Getenv("SCIP_LSP_USE_BLOOM_IMPLEMENTATIONS"), "true")
 	return &PartialLoadedIndex{
 		PrefixTreeRoot:       NewSymbolPrefixTree(),
 		DocTreeNodes:         make(map[string]*docNodes),
@@ -76,6 +101,9 @@ func NewPartialLoadedIndex(indexFolder string) PartialIndex {
 		pool:                 scanner.NewBufferPool(1024, 12),
 		onDocumentLoaded:     func(*model.Document) {},
 		ImplementorsBySymbol: make(map[string]map[string]struct{}),
+		useBloomImplementations: useBloom,
+		indexBlooms:             make(map[string]*BloomFilter),
+		loadedIndexPaths:        make(map[string]struct{}),
 	}
 }
 
@@ -137,6 +165,7 @@ func (p *PartialLoadedIndex) LoadIndex(indexPath string, indexReader scanner.Sci
 	localUpdatedDocs := make(map[string]int64)
 	localDocToIndex := make(map[string]string)
 	localImplementorsBySymbol := make(map[string]map[string]struct{})
+	localAbsSymbols := make(map[string]struct{})
 
 	loadScanner := &scanner.IndexScannerImpl{
 		Pool: p.pool,
@@ -168,6 +197,7 @@ func (p *PartialLoadedIndex) LoadIndex(indexPath string, indexReader scanner.Sci
 			for _, rel := range modelInfo.Relationships {
 				if rel != nil && rel.IsImplementation {
 					abs := rel.Symbol
+					localAbsSymbols[abs] = struct{}{}
 					if localImplementorsBySymbol[abs] == nil {
 						localImplementorsBySymbol[abs] = make(map[string]struct{})
 					}
@@ -198,6 +228,22 @@ func (p *PartialLoadedIndex) LoadIndex(indexPath string, indexReader scanner.Sci
 		p.mergeUpdatedDocs(localUpdatedDocs)
 		p.mergeDocToIndex(localDocToIndex)
 		p.mergeImplementors(localImplementorsBySymbol)
+
+		// Update Bloom filter and loaded index list for this index file.
+		if indexPath != "" {
+			p.loadedIndexMu.Lock()
+			p.loadedIndexPaths[indexPath] = struct{}{}
+			p.loadedIndexMu.Unlock()
+
+			// Build a bloom filter for abs symbols that appear in implementation relationships in this index.
+			bf := NewBloomFilter(len(localAbsSymbols), 0.01)
+			for abs := range localAbsSymbols {
+				bf.Add(abs)
+			}
+			p.indexBloomMu.Lock()
+			p.indexBlooms[indexPath] = bf
+			p.indexBloomMu.Unlock()
+		}
 	}()
 	return loadScanner.ScanIndexReader(indexReader)
 }
@@ -402,9 +448,17 @@ func (p *PartialLoadedIndex) loadDocumentFromIndexFolder(relativeDocPath string)
 
 // Implementations returns the list of implementing symbols for a given abstract/interface symbol
 func (p *PartialLoadedIndex) Implementations(symbol string) ([]string, error) {
+	if scip.IsLocalSymbol(symbol) {
+		return []string{}, nil
+	}
+
+	if p.useBloomImplementations {
+		return p.implementationsByBloom(symbol)
+	}
+
 	p.implementorsMu.RLock()
-	defer p.implementorsMu.RUnlock()
 	set := p.ImplementorsBySymbol[symbol]
+	p.implementorsMu.RUnlock()
 	if set == nil {
 		return []string{}, nil
 	}
@@ -412,6 +466,75 @@ func (p *PartialLoadedIndex) Implementations(symbol string) ([]string, error) {
 	for s := range set {
 		res = append(res, s)
 	}
+	sort.Strings(res)
+	return res, nil
+}
+
+// implementationsByBloom uses per-index Bloom filters to select candidate index files and then scans
+// only those files to collect implementing symbols for the given abstract/interface symbol.
+func (p *PartialLoadedIndex) implementationsByBloom(symbol string) ([]string, error) {
+	p.loadedIndexMu.RLock()
+	indices := make([]string, 0, len(p.loadedIndexPaths))
+	for idx := range p.loadedIndexPaths {
+		indices = append(indices, idx)
+	}
+	p.loadedIndexMu.RUnlock()
+
+	// If we have no known loaded index files (e.g. LoadIndex called without a path), fall back to in-memory map.
+	if len(indices) == 0 {
+		p.implementorsMu.RLock()
+		set := p.ImplementorsBySymbol[symbol]
+		p.implementorsMu.RUnlock()
+		if set == nil {
+			return []string{}, nil
+		}
+		res := make([]string, 0, len(set))
+		for s := range set {
+			res = append(res, s)
+		}
+		sort.Strings(res)
+		return res, nil
+	}
+
+	results := make(map[string]struct{})
+	for _, indexPath := range indices {
+		// Bloom prefilter: skip index files that definitely don't contain impl relationships for this symbol.
+		p.indexBloomMu.RLock()
+		bf := p.indexBlooms[indexPath]
+		p.indexBloomMu.RUnlock()
+		if bf != nil && !bf.MightContain(symbol) {
+			continue
+		}
+
+		var mu sync.Mutex
+		sc := &scanner.IndexScannerImpl{
+			Pool: p.pool,
+			MatchSymbol: func(_ []byte) bool {
+				// We only care about global symbols for relationships.
+				return true
+			},
+			VisitSymbol: func(_ string, info *scip.SymbolInformation) {
+				modelInfo := mapper.ScipSymbolInformationToModelSymbolInformation(info)
+				for _, rel := range modelInfo.Relationships {
+					if rel != nil && rel.IsImplementation && rel.Symbol == symbol {
+						mu.Lock()
+						results[modelInfo.Symbol] = struct{}{}
+						mu.Unlock()
+					}
+				}
+			},
+		}
+		sc.InitBuffers()
+		if err := sc.ScanIndexFile(indexPath); err != nil {
+			return nil, err
+		}
+	}
+
+	res := make([]string, 0, len(results))
+	for s := range results {
+		res = append(res, s)
+	}
+	sort.Strings(res)
 	return res, nil
 }
 

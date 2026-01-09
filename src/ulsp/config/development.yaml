@@ -10,6 +10,8 @@ monorepos:
   _default:
     scip:
       loadFromDirectories: true
+      # Optional: speed up gotoImplementation by using a bloom-filter prefilter when scanning indices.
+      # useBloomImplementations: false
       directories:
         - '.scip'
 

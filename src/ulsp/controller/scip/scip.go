@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"path"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/sourcegraph/scip/bindings/go/scip"
 	tally "github.com/uber-go/tally/v4"
 	"github.com/uber/scip-lsp/src/scip-lib/mapper"
 	"github.com/uber/scip-lsp/src/scip-lib/model"
@@ -76,7 +78,7 @@ type controller struct {
 	initialLoad     chan bool
 	watchCloser     chan bool
 	loadedIndices   map[string]string
-	newScipRegistry func(workspaceRoot, indexFolder string) registry.Registry
+	newScipRegistry func(workspaceRoot, indexFolder string, useBloomImplementations bool) registry.Registry
 	debounceTimers  map[string]*time.Timer
 	debounceMu      sync.Mutex
 	indexNotifier   *IndexNotifier
@@ -116,9 +118,11 @@ func New(p Params) (Controller, error) {
 		loadedIndices:  make(map[string]string),
 		debounceTimers: make(map[string]*time.Timer),
 		indexNotifier:  NewIndexNotifier(notifier.NewNotificationManager(notificationManagerParams)),
-		newScipRegistry: func(workspaceRoot, indexFolder string) registry.Registry {
+		newScipRegistry: func(workspaceRoot, indexFolder string, useBloomImplementations bool) registry.Registry {
 			p.Logger.Infof("Creating new SCIP registry for %q, index folder %q", workspaceRoot, indexFolder)
-			return registry.NewPartialScipRegistry(workspaceRoot, indexFolder, p.Logger.Named("fast-loader"))
+			return registry.NewPartialScipRegistryWithOptions(workspaceRoot, indexFolder, p.Logger.Named("fast-loader"), registry.PartialScipRegistryOptions{
+				UseBloomImplementations: useBloomImplementations,
+			})
 		},
 	}, nil
 }
@@ -131,7 +135,8 @@ func (c *controller) createNewScipRegistry(workspaceRoot string, monorepo entity
 	if len(c.configs[monorepo].Scip.Directories) > 0 {
 		indexFolder = path.Join(workspaceRoot, c.configs[monorepo].Scip.Directories[0])
 	}
-	reg := c.newScipRegistry(workspaceRoot, indexFolder)
+	useBloom := c.configs["_default"].Scip.UseBloomImplementations || c.configs[monorepo].Scip.UseBloomImplementations
+	reg := c.newScipRegistry(workspaceRoot, indexFolder, useBloom)
 
 	reg.SetDocumentLoadedCallback(func(doc *model.Document) {
 		docURI := reg.GetURI(doc.RelativePath)
@@ -616,10 +621,13 @@ func (c *controller) hover(ctx context.Context, params *protocol.HoverParams, re
 	}
 
 	if len(docs) > 0 {
-		rng := mapper.ScipToProtocolRange(occ.Range)
 		if result == nil {
-			*result = protocol.Hover{}
+			return nil
 		}
+		if occ == nil {
+			return nil
+		}
+		rng := mapper.ScipToProtocolRange(occ.Range)
 		if result.Range == nil {
 			mappedRange := c.getLatestRange(ctx, params.TextDocument, rng)
 			result.Range = &mappedRange
@@ -641,8 +649,89 @@ func (c *controller) gotoTypeDefinition(ctx context.Context, params *protocol.Ty
 }
 
 func (c *controller) gotoImplementation(ctx context.Context, params *protocol.ImplementationParams, result *[]protocol.LocationLink) error {
-	// TODO: Implement code navigation
-	// https://t3.uberinternal.com/browse/IDE-642
+	if params == nil || result == nil {
+		return nil
+	}
+	sesh, err := c.sessions.GetFromContext(ctx)
+	if err != nil {
+		return err
+	}
+	reg := c.registries[sesh.WorkspaceRoot]
+	if reg == nil {
+		return nil
+	}
+
+	mappedPosition, err := c.getBasePosition(ctx, params.TextDocument, params.Position)
+	if err != nil {
+		return err
+	} else if mappedPosition == nil {
+		return nil
+	}
+
+	// Use Hover() as a lightweight way to get the occurrence at the requested position.
+	// It returns the occurrence even if there is no hover documentation.
+	_, occ, err := reg.Hover(params.TextDocument.URI, *mappedPosition)
+	if err != nil {
+		return fmt.Errorf("failed to get symbol occurrence: %w", err)
+	}
+	if occ == nil {
+		return nil
+	}
+	if scip.IsLocalSymbol(occ.Symbol) {
+		// Local symbols can't participate in cross-file implementation relationships.
+		return nil
+	}
+
+	implSymbols, err := reg.Implementations(occ.Symbol)
+	if err != nil {
+		return fmt.Errorf("failed to get implementations: %w", err)
+	}
+	if len(implSymbols) == 0 {
+		return nil
+	}
+
+	// Stabilize output ordering (bloom-scanning uses maps internally).
+	sort.Strings(implSymbols)
+
+	originRange := c.getLatestRange(ctx, params.TextDocument, mapper.ScipToProtocolRange(occ.Range))
+
+	seen := make(map[protocol.DocumentURI]struct{}, len(implSymbols))
+	for _, implSym := range implSymbols {
+		sy, err := model.ParseScipSymbol(implSym)
+		if err != nil {
+			// Skip malformed symbols rather than failing the request.
+			c.logger.Warnf("failed to parse implementation symbol %q: %v", implSym, err)
+			continue
+		}
+
+		def, err := reg.GetSymbolDefinitionOccurrence(mapper.ScipDescriptorsToModelDescriptors(sy.Descriptors), sy.Package.Version)
+		if err != nil {
+			return fmt.Errorf("failed to resolve implementation definition for %q: %w", implSym, err)
+		}
+		if def == nil {
+			continue
+		}
+
+		// Deduplicate by target URI (LSP accepts duplicates but it's noisy).
+		if _, ok := seen[def.Location]; ok {
+			continue
+		}
+		seen[def.Location] = struct{}{}
+
+		l := protocol.LocationLink{
+			TargetURI:            def.Location,
+			OriginSelectionRange: &originRange,
+		}
+
+		if def.Occurrence != nil {
+			rng := c.getLatestRange(ctx, protocol.TextDocumentIdentifier{URI: def.Location}, mapper.ScipToProtocolRange(def.Occurrence.Range))
+			l.TargetRange = rng
+			l.TargetSelectionRange = rng
+		}
+
+		*result = append(*result, l)
+	}
+
 	return nil
 }
 

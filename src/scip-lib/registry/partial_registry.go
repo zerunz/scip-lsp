@@ -25,6 +25,11 @@ type partialScipRegistry struct {
 	logger        *zap.SugaredLogger
 }
 
+// PartialScipRegistryOptions configure optional registry capabilities.
+type PartialScipRegistryOptions struct {
+	UseBloomImplementations bool
+}
+
 // Legacy methods
 
 // GetURI gets the full path to a document as an LSP uri.
@@ -210,6 +215,10 @@ func (p *partialScipRegistry) References(sourceURI uri.URI, pos protocol.Positio
 	return locations, nil
 }
 
+func (p *partialScipRegistry) Implementations(symbol string) ([]string, error) {
+	return p.Index.Implementations(symbol)
+}
+
 func (p *partialScipRegistry) Hover(uri uri.URI, pos protocol.Position) (string, *model.Occurrence, error) {
 	doc, err := p.Index.LoadDocument(p.uriToRelativePath(uri))
 	if err != nil {
@@ -292,10 +301,17 @@ func (p *partialScipRegistry) LoadConcurrency() int {
 
 // NewPartialScipRegistry creates a new partial SCIP registry
 func NewPartialScipRegistry(workspaceRoot string, indexFolder string, logger *zap.SugaredLogger) Registry {
+	return NewPartialScipRegistryWithOptions(workspaceRoot, indexFolder, logger, PartialScipRegistryOptions{})
+}
+
+// NewPartialScipRegistryWithOptions creates a new partial SCIP registry using explicit options.
+func NewPartialScipRegistryWithOptions(workspaceRoot string, indexFolder string, logger *zap.SugaredLogger, opts PartialScipRegistryOptions) Registry {
 	return &partialScipRegistry{
 		WorkspaceRoot: workspaceRoot,
 		IndexFolder:   indexFolder,
-		Index:         partialloader.NewPartialLoadedIndex(indexFolder),
+		Index: partialloader.NewPartialLoadedIndexWithOptions(indexFolder, partialloader.Options{
+			UseBloomImplementations: opts.UseBloomImplementations,
+		}),
 		logger:        logger,
 	}
 }
